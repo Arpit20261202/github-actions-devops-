@@ -1,0 +1,175 @@
+name: DevOps CI Pipeline (Build + Test + Cache + Artifact + CodeQL + SAST)
+
+on:
+  push:
+    branches: [main, dev]
+
+  pull_request:
+    branches: [main]
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  build:
+    name: Build Application
+    runs-on: ubuntu-latest
+
+    outputs:
+      build_status: success
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # ------------------------
+      # CACHE
+      # ------------------------
+      - name: Cache Python Packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: python-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            python-${{ runner.os }}-
+
+      - name: Install Dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build Project
+        run: |
+          mkdir build
+          cp app.py build/
+          echo "Build Completed Successfully" > build/build-report.txt
+
+      # ------------------------
+      # ARTIFACT
+      # ------------------------
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-files
+          path: build/
+
+  test:
+    name: Run Unit Tests
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: python-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - run: pip install -r requirements.txt
+
+      - name: Run Pytest
+        run: |
+          pytest test_app.py --junitxml=test-report.xml
+
+      - name: Upload Test Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report
+          path: test-report.xml
+
+  sast-bandit:
+    name: Bandit Security Scan
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install bandit
+
+      - name: Run Bandit Scan
+        run: |
+          mkdir reports
+          bandit -r . -f txt -o reports/bandit-report.txt || true
+
+      - name: Upload Bandit Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-report
+          path: reports/bandit-report.txt
+
+  codeql:
+    name: CodeQL Analysis
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Scan
+        uses: github/codeql-action/analyze@v3
+
+  artifact-download:
+    name: Download Artifact Demo
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: build-files
+          path: downloaded-build
+
+      - name: Show Artifact Content
+        run: |
+          ls downloaded-build
+          cat downloaded-build/build-report.txt
+
+  status-check:
+    name: Final Status Check
+    needs: [build, test, sast-bandit, codeql, artifact-download]
+    runs-on: ubuntu-latest
+
+    if: success()
+
+    steps:
+      - name: Pipeline Successful
+        run: echo "All Build, Test, Artifact, SAST, Cache and CodeQL jobs passed."
+
+  notify-failure:
+    name: Failure Notification
+    needs: [build, test, sast-bandit, codeql]
+    runs-on: ubuntu-latest
+
+    if: failure()
+
+    steps:
+      - name: Print Failure Message
+        run: echo "One or more jobs failed. Check GitHub Actions logs."
